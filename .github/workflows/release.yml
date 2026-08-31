@@ -1,0 +1,173 @@
+name: Build and release
+
+on:
+  workflow_dispatch:
+    inputs:
+      prerelease:
+        description: Mark this release as a pre-release
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: st-core-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build all platforms and publish
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "0"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Calculate next version
+        id: version
+        shell: bash
+        env:
+          PRE_RELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+
+          latest_stable="$({
+            git tag --list |
+              grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' |
+              sort -V |
+              tail -n 1
+          } || true)"
+
+          if [[ -z "$latest_stable" ]]; then
+            latest_stable="v0.0.0"
+          fi
+
+          IFS=. read -r major minor patch <<< "${latest_stable#v}"
+          next_version="v${major}.${minor}.$((patch + 1))"
+
+          if [[ "$PRE_RELEASE" == "true" ]]; then
+            next_version="${next_version}-pre.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+          fi
+
+          if git rev-parse --verify --quiet "refs/tags/${next_version}" >/dev/null; then
+            echo "Tag ${next_version} already exists" >&2
+            exit 1
+          fi
+
+          previous_tag="$(git for-each-ref \
+            --count=1 \
+            --sort=-creatordate \
+            --format='%(refname:short)' \
+            'refs/tags/v*')"
+
+          echo "version=${next_version}" >> "$GITHUB_OUTPUT"
+          echo "previous_tag=${previous_tag}" >> "$GITHUB_OUTPUT"
+          echo "Next release: ${next_version}"
+
+      - name: Build release notes from commit messages
+        shell: bash
+        env:
+          PREVIOUS_TAG: ${{ steps.version.outputs.previous_tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          {
+            echo "## ${VERSION}"
+            echo
+            echo "### Changes"
+            echo
+
+            if [[ -n "$PREVIOUS_TAG" ]]; then
+              commits="$(git log --no-merges --pretty='format:- %s (`%h`)' "${PREVIOUS_TAG}..HEAD")"
+            else
+              commits="$(git log --no-merges --pretty='format:- %s (`%h`)')"
+            fi
+
+            if [[ -n "$commits" ]]; then
+              printf '%s\n' "$commits"
+            else
+              echo "- No new commit messages since ${PREVIOUS_TAG}."
+            fi
+          } > release-notes.md
+
+      - name: Build every standalone Go target
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          while IFS=/ read -r target_os target_arch; do
+            # Android and iOS require native SDK/cgo application packaging rather
+            # than a portable standalone Go executable.
+            if [[ "$target_os" == "android" || "$target_os" == "ios" ]]; then
+              echo "Skipping ${target_os}/${target_arch}: native SDK packaging required"
+              continue
+            fi
+
+            asset_name="st-core-${VERSION}-${target_os}-${target_arch}"
+            package_dir="$(mktemp -d)"
+            binary_name="st-core"
+
+            if [[ "$target_os" == "windows" ]]; then
+              binary_name="st-core.exe"
+            elif [[ "$target_arch" == "wasm" ]]; then
+              binary_name="st-core.wasm"
+            fi
+
+            echo "Building ${target_os}/${target_arch}"
+            GOOS="$target_os" GOARCH="$target_arch" go build \
+              -trimpath \
+              -ldflags="-s -w" \
+              -o "${package_dir}/${binary_name}" \
+              ./cmd/st-core
+
+            cp config.yaml LICENSE "$package_dir/"
+
+            if [[ "$target_os" == "windows" ]]; then
+              (cd "$package_dir" && zip -q "${GITHUB_WORKSPACE}/dist/${asset_name}.zip" ./*)
+            else
+              tar -C "$package_dir" -czf "dist/${asset_name}.tar.gz" .
+            fi
+          done < <(go tool dist list)
+
+          (
+            cd dist
+            sha256sum ./*.tar.gz ./*.zip > checksums.txt
+          )
+
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRE_RELEASE: ${{ inputs.prerelease }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          release_args=(
+            release create "$VERSION"
+            --target "$GITHUB_SHA"
+            --title "st-core ${VERSION}"
+            --notes-file release-notes.md
+          )
+
+          if [[ "$PRE_RELEASE" == "true" ]]; then
+            release_args+=(--prerelease --latest=false)
+          fi
+
+          gh "${release_args[@]}" dist/*
