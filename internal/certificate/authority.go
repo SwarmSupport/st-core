@@ -88,20 +88,27 @@ func (m *Manager) CertificateForHost(host string) (*tls.Certificate, error) {
 		return nil, errors.New("certificate host is empty")
 	}
 	if cached, ok := m.cache.Load(host); ok {
-		return cached.(*tls.Certificate), nil
+		certificate := cached.(*tls.Certificate)
+		if certificate.Leaf != nil && time.Until(certificate.Leaf.NotAfter) > time.Minute {
+			return certificate, nil
+		}
 	}
 	cert, err := m.generateCertificate(host)
 	if err != nil {
 		return nil, err
 	}
-	actual, loaded := m.cache.LoadOrStore(host, cert)
-	if loaded {
-		return actual.(*tls.Certificate), nil
-	}
+	m.cache.Store(host, cert)
 	return cert, nil
 }
 
 func GenerateCA(certFile, keyFile string) error {
+	for _, path := range []string{certFile, keyFile} {
+		if _, err := os.Stat(path); err == nil {
+			return fmt.Errorf("CA file %q already exists", path)
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("stat CA file %q: %w", path, err)
+		}
+	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return fmt.Errorf("generate CA private key: %w", err)
@@ -120,6 +127,7 @@ func GenerateCA(certFile, keyFile string) error {
 		return err
 	}
 	if err := writePrivateKey(keyFile, key); err != nil {
+		os.Remove(certFile)
 		return err
 	}
 	return nil
@@ -186,7 +194,7 @@ func verifyKeyPair(cert *x509.Certificate, key crypto.Signer) error {
 }
 
 func writeCertificate(path string, der []byte) error {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o644)
 	if err != nil {
 		return fmt.Errorf("open CA certificate %q: %w", path, err)
 	}
@@ -205,7 +213,7 @@ func writePrivateKey(path string, key *ecdsa.PrivateKey) error {
 	if err != nil {
 		return fmt.Errorf("marshal CA private key: %w", err)
 	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
 	if err != nil {
 		return fmt.Errorf("open CA private key %q: %w", path, err)
 	}

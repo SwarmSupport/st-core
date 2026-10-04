@@ -1,0 +1,47 @@
+name: Mobile libraries
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'mobilecore/**'
+      - 'internal/proxyserver/**'
+      - 'scripts/build-mobile.sh'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/mobile.yml'
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: android-actions/setup-android@v3
+      - name: Install Android NDK
+        run: |
+          sdkmanager 'platforms;android-35' 'ndk;27.2.12479018'
+      - name: Build AAR
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/27.2.12479018"
+          ./scripts/build-mobile.sh android
+      - uses: actions/upload-artifact@v4
+        with:
+          name: st-core-android
+          path: dist/st-core.aar
+
+  ios:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build XCFramework
+        run: ./scripts/build-mobile.sh ios org.swarmtools.stcore
+      - uses: actions/upload-artifact@v4
+        with:
+          name: st-core-ios
+          path: dist/STCore.xcframework

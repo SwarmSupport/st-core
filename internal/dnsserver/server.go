@@ -52,7 +52,7 @@ func (s *Server) ListenAndServe() error {
 }
 
 func (s *Server) handle(writer dns.ResponseWriter, request *dns.Msg) {
-	if len(request.Question) > 0 && s.policy != nil && !s.policy.ShouldHandle(request.Question[0].Name) {
+	if !s.shouldReturnLocal(request) {
 		s.forward(writer, request)
 		return
 	}
@@ -74,6 +74,18 @@ func (s *Server) handle(writer dns.ResponseWriter, request *dns.Msg) {
 	if err := writer.WriteMsg(response); err != nil {
 		_ = writer.Close()
 	}
+}
+
+func (s *Server) shouldReturnLocal(request *dns.Msg) bool {
+	if len(request.Question) == 0 || s.policy == nil {
+		return true
+	}
+	for _, question := range request.Question {
+		if !s.policy.ShouldHandle(question.Name) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) forward(writer dns.ResponseWriter, request *dns.Msg) {

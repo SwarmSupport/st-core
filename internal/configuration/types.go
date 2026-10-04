@@ -1,9 +1,12 @@
 package configuration
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
+
+	"go.yaml.in/yaml/v3"
 )
 
 type Config struct {
@@ -13,6 +16,7 @@ type Config struct {
 	DNS         DNSConfig       `yaml:"dns"`
 	Proxy       ProxyConfig     `yaml:"proxy"`
 	Routing     RoutingConfig   `yaml:"routing"`
+	Origin      OriginConfig    `yaml:"origin"`
 	SpeedTest   SpeedTestConfig `yaml:"speedtest"`
 	Routes      []Route         `yaml:"routes"`
 }
@@ -23,11 +27,13 @@ type CAConfig struct {
 }
 
 type DNSConfig struct {
-	DoHServer          string   `yaml:"doh_server"`
-	BootstrapAddresses []string `yaml:"bootstrap_addresses"`
-	Listen             string   `yaml:"listen"`
-	LocalIPv4          string   `yaml:"local_ipv4"`
-	LocalIPv6          string   `yaml:"local_ipv6"`
+	DoHServer                string   `yaml:"doh_server"`
+	BootstrapAddresses       []string `yaml:"bootstrap_addresses"`
+	DirectDoHServer          string   `yaml:"direct_doh_server"`
+	DirectBootstrapAddresses []string `yaml:"direct_bootstrap_addresses"`
+	Listen                   string   `yaml:"listen"`
+	LocalIPv4                string   `yaml:"local_ipv4"`
+	LocalIPv6                string   `yaml:"local_ipv6"`
 }
 
 type ProxyConfig struct {
@@ -41,6 +47,28 @@ type RoutingConfig struct {
 	RuleListCache string   `yaml:"rule_list_cache"`
 	RefreshHours  int      `yaml:"refresh_hours"`
 	Rules         []string `yaml:"rules"`
+}
+
+type OriginConfig struct {
+	Lists              map[string]string       `yaml:"lists"`
+	Domains            map[string]OriginSource `yaml:"domains"`
+	InsecureSkipVerify bool                    `yaml:"insecure_skip_verify"`
+}
+
+type OriginSource struct {
+	List      string
+	Addresses []string
+}
+
+func (s *OriginSource) UnmarshalYAML(node *yaml.Node) error {
+	switch node.Kind {
+	case yaml.ScalarNode:
+		return node.Decode(&s.List)
+	case yaml.SequenceNode:
+		return node.Decode(&s.Addresses)
+	default:
+		return fmt.Errorf("must be a named origin list or an array of IP addresses")
+	}
 }
 
 func (c RoutingConfig) RefreshInterval() time.Duration {

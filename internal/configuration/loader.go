@@ -31,6 +31,12 @@ func (c *Config) applyDefaults() {
 	if c.DNS.Listen == "" {
 		c.DNS.Listen = "127.0.0.1:53"
 	}
+	if c.DNS.DirectDoHServer == "" {
+		c.DNS.DirectDoHServer = "https://dns.alidns.com/dns-query"
+	}
+	if len(c.DNS.DirectBootstrapAddresses) == 0 && c.DNS.DirectDoHServer == "https://dns.alidns.com/dns-query" {
+		c.DNS.DirectBootstrapAddresses = []string{"223.5.5.5", "223.6.6.6"}
+	}
 	if c.Routing.Mode == "" {
 		c.Routing.Mode = "rule"
 	}

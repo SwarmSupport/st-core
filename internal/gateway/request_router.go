@@ -7,34 +7,31 @@ import (
 	"sync"
 
 	"st-core/internal/configuration"
-	"st-core/internal/speedtest"
 )
 
 type Router struct {
 	mu       sync.RWMutex
 	sites    map[string]*Site
 	resolver DomainResolver
-	selector *speedtest.Selector
 	policy   TrafficPolicy
+	origins  *OriginPool
 }
 
 type TrafficPolicy interface {
 	ShouldHandle(string) bool
 }
 
-func NewRouter(cfg *configuration.Config, resolver DomainResolver, policies ...TrafficPolicy) *Router {
+func NewRouter(cfg *configuration.Config, resolver DomainResolver, policy TrafficPolicy, origins *OriginPool) *Router {
 	router := &Router{
 		sites:    make(map[string]*Site),
 		resolver: resolver,
-		selector: speedtest.NewSelector(cfg.SpeedTest),
-	}
-	if len(policies) > 0 {
-		router.policy = policies[0]
+		policy:   policy,
+		origins:  origins,
 	}
 	for _, route := range cfg.Routes {
 		host := normalizeRequestHost(route.Host)
 		route.Host = host
-		site := BuildSite(route, resolver, router.selector)
+		site := BuildSite(route, resolver, origins)
 		router.sites[host] = site
 	}
 	return router
@@ -73,13 +70,13 @@ func (r *Router) siteForHost(host string) *Site {
 			Port: 443,
 		},
 	}
-	site = BuildSite(route, r.resolver, r.selector)
+	site = BuildSite(route, r.resolver, r.origins)
 	r.sites[host] = site
 	return site
 }
 
-func BuildSite(route configuration.Route, resolver DomainResolver, selectors ...*speedtest.Selector) *Site {
-	transport := BuildTransport(route, resolver, selectors...)
+func BuildSite(route configuration.Route, resolver DomainResolver, origins *OriginPool) *Site {
+	transport := BuildTransport(route, resolver, origins)
 	reverseProxy := BuildReverseProxy(route, transport)
 	return &Site{Host: route.Host, Config: route, Proxy: reverseProxy}
 }

@@ -23,6 +23,13 @@ import (
 
 const maxRuleListSize = 4 << 20
 
+var gfwListMirrors = []string{
+	"https://testingcf.jsdelivr.net/gh/gfwlist/gfwlist/gfwlist.txt",
+	"https://cdn.jsdelivr.net/gh/gfwlist/gfwlist/gfwlist.txt",
+	"https://fastly.jsdelivr.net/gh/gfwlist/gfwlist/gfwlist.txt",
+	"https://raw.githubusercontent.com/gfwlist/gfwlist/master/gfwlist.txt",
+}
+
 type DomainResolver interface {
 	Resolve(context.Context, string) ([]net.IP, error)
 }
@@ -185,21 +192,73 @@ func loadRuleList(ctx context.Context, cfg configuration.RoutingConfig, resolver
 		return cached, cfg.RuleListCache, nil
 	}
 
-	downloaded, err := downloadRuleList(ctx, cfg.RuleListURL, resolver)
-	if err == nil {
-		err = validateRuleList(downloaded)
-	}
+	downloaded, source, err := downloadRuleLists(ctx, ruleListURLs(cfg.RuleListURL), resolver)
 	if err == nil {
 		if cacheErr := writeCache(cfg.RuleListCache, downloaded); cacheErr != nil {
 			log.Printf("routing rule cache path=%s error=%v", cfg.RuleListCache, cacheErr)
 		}
-		return downloaded, cfg.RuleListURL, nil
+		return downloaded, source, nil
 	}
 	if cacheValid {
 		log.Printf("routing rule refresh url=%s error=%v; using stale cache", cfg.RuleListURL, err)
 		return cached, cfg.RuleListCache, nil
 	}
 	return nil, "", fmt.Errorf("load routing rules: download %s: %w; cache %s: %v", cfg.RuleListURL, err, cfg.RuleListCache, cacheErr)
+}
+
+func ruleListURLs(configured string) []string {
+	urls := []string{configured}
+	knownGFWListURL := false
+	for _, mirror := range gfwListMirrors {
+		if configured == mirror {
+			knownGFWListURL = true
+			break
+		}
+	}
+	if !knownGFWListURL {
+		return urls
+	}
+	for _, mirror := range gfwListMirrors {
+		if mirror != configured {
+			urls = append(urls, mirror)
+		}
+	}
+	return urls
+}
+
+type ruleListDownload struct {
+	data   []byte
+	source string
+	err    error
+}
+
+func downloadRuleLists(ctx context.Context, urls []string, resolver DomainResolver) ([]byte, string, error) {
+	if len(urls) == 0 {
+		return nil, "", errors.New("no rule-list URLs configured")
+	}
+	downloadContext, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	results := make(chan ruleListDownload, len(urls))
+	for _, rawURL := range urls {
+		go func() {
+			data, err := downloadRuleList(downloadContext, rawURL, resolver)
+			if err == nil {
+				err = validateRuleList(data)
+			}
+			results <- ruleListDownload{data: data, source: rawURL, err: err}
+		}()
+	}
+
+	errorsByURL := make([]error, 0, len(urls))
+	for range urls {
+		result := <-results
+		if result.err == nil {
+			return result.data, result.source, nil
+		}
+		errorsByURL = append(errorsByURL, fmt.Errorf("%s: %w", result.source, result.err))
+	}
+	return nil, "", errors.Join(errorsByURL...)
 }
 
 func validateRuleList(data []byte) error {

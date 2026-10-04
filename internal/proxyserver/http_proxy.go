@@ -2,11 +2,13 @@ package proxyserver
 
 import (
 	"bufio"
+	"context"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -14,6 +16,8 @@ type HTTPServer struct {
 	server    *http.Server
 	transport *http.Transport
 	dialer    *Dialer
+	mu        sync.Mutex
+	tunnels   map[net.Conn]net.Conn
 }
 
 func NewHTTPServer(address string, dialer *Dialer) *HTTPServer {
@@ -43,7 +47,20 @@ func (s *HTTPServer) ListenAndServe() error {
 		return err
 	}
 	defer listener.Close()
-	return s.server.Serve(listener)
+	return s.Serve(listener)
+}
+
+func (s *HTTPServer) Serve(listener net.Listener) error { return s.server.Serve(listener) }
+
+func (s *HTTPServer) Shutdown(ctx context.Context) error {
+	s.mu.Lock()
+	for client, upstream := range s.tunnels {
+		_ = client.Close()
+		_ = upstream.Close()
+	}
+	s.mu.Unlock()
+	s.transport.CloseIdleConnections()
+	return s.server.Shutdown(ctx)
 }
 
 func (s *HTTPServer) ServeHTTP(w http.ResponseWriter, request *http.Request) {
@@ -70,6 +87,17 @@ func (s *HTTPServer) serveConnect(w http.ResponseWriter, request *http.Request) 
 		http.Error(w, "proxy does not support hijacking", http.StatusInternalServerError)
 		return
 	}
+	s.mu.Lock()
+	if s.tunnels == nil {
+		s.tunnels = make(map[net.Conn]net.Conn)
+	}
+	s.tunnels[client] = upstream
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.tunnels, client)
+		s.mu.Unlock()
+	}()
 	if _, err := readerWriter.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
 		client.Close()
 		upstream.Close()

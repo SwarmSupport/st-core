@@ -1,0 +1,63 @@
+https_listen: "127.0.0.1:443"
+http_listen: "127.0.0.1:80"
+
+ca:
+  cert: "mitm-ca.crt"
+  key: "mitm-ca.key"
+
+dns:
+  doh_server: "https://cloudflare-dns.com/dns-query"
+  bootstrap_addresses:
+    - "1.1.1.1"
+    - "1.0.0.1"
+  direct_doh_server: "https://dns.alidns.com/dns-query"
+  direct_bootstrap_addresses:
+    - "223.5.5.5"
+    - "223.6.6.6"
+  listen: "127.0.0.1:53"
+
+proxy:
+  http_listen: "127.0.0.1:8080"
+  socks5_listen: "127.0.0.1:1080"
+
+routing:
+  mode: "rule"
+  rule_list_url: "https://testingcf.jsdelivr.net/gh/gfwlist/gfwlist/gfwlist.txt"
+  rule_list_cache: "gfwlist.cache"
+  refresh_hours: 24
+
+origin:
+  lists:
+    aka-iplist: "https://testingcf.jsdelivr.net/gh/SwarmSupport/st-core/iplist/aka-iplist.txt"
+    cf-iplist: "https://testingcf.jsdelivr.net/gh/SwarmSupport/st-core/iplist/cf-iplist.txt"
+    cft-iplist: "https://testingcf.jsdelivr.net/gh/SwarmSupport/st-core/iplist/cft-iplist.txt"
+    fl-iplist: "https://testingcf.jsdelivr.net/gh/SwarmSupport/st-core/iplist/fl-iplist.txt"
+  # Exact domains and wildcard domains can select a named list:
+  domains:
+    x.com:
+      - "151.101.90.146"
+      - "199.232.114.146"
+    "*.x.com":
+      - "151.101.90.146"
+      - "199.232.114.146"
+    twimg.com:
+      - "140.248.128.159"
+      - "151.101.76.159"
+    "*.twimg.com":
+      - "140.248.128.159"
+      - "151.101.76.159"
+    google.com:
+      - "142.251.10.94"
+      - "172.217.194.94"
+    "*.google.com":
+      - "142.251.10.94"
+      - "172.217.194.94"
+    # A domain can also use literal origin IPs instead of a named list:
+    # example.com:
+    #   - "1.1.1.1"
+    #   - "1.0.0.1"
+
+speedtest:
+  download_bytes: 1000000
+  timeout_seconds: 8
+  cache_ttl_seconds: 1800

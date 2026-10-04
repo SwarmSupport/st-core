@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -27,6 +28,8 @@ const (
 type SOCKS5Server struct {
 	Address string
 	Dialer  *Dialer
+	mu      sync.Mutex
+	clients map[net.Conn]struct{}
 }
 
 func (s *SOCKS5Server) ListenAndServe() error {
@@ -35,16 +38,39 @@ func (s *SOCKS5Server) ListenAndServe() error {
 		return err
 	}
 	defer listener.Close()
+	return s.Serve(listener)
+}
+
+func (s *SOCKS5Server) Serve(listener net.Listener) error {
 	for {
 		connection, err := listener.Accept()
 		if err != nil {
 			return err
 		}
+		s.mu.Lock()
+		if s.clients == nil {
+			s.clients = make(map[net.Conn]struct{})
+		}
+		s.clients[connection] = struct{}{}
+		s.mu.Unlock()
 		go func() {
+			defer func() {
+				s.mu.Lock()
+				delete(s.clients, connection)
+				s.mu.Unlock()
+			}()
 			if err := s.handle(connection); err != nil {
 				log.Printf("SOCKS5 client=%s error=%v", connection.RemoteAddr(), err)
 			}
 		}()
+	}
+}
+
+func (s *SOCKS5Server) CloseClients() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for connection := range s.clients {
+		_ = connection.Close()
 	}
 }
 

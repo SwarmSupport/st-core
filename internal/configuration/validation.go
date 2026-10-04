@@ -38,6 +38,10 @@ func (c *Config) Validate() error {
 	if err != nil || (dohURL.Scheme != "https" && dohURL.Scheme != "http") || dohURL.Host == "" {
 		return fmt.Errorf("dns.doh_server must be a valid HTTP(S) URL")
 	}
+	directDoHURL, err := url.Parse(c.DNS.DirectDoHServer)
+	if err != nil || (directDoHURL.Scheme != "https" && directDoHURL.Scheme != "http") || directDoHURL.Host == "" {
+		return fmt.Errorf("dns.direct_doh_server must be a valid HTTP(S) URL")
+	}
 	for name, address := range map[string]string{
 		"https_listen":        c.HTTPSListen,
 		"http_listen":         c.HTTPListen,
@@ -66,6 +70,11 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("dns.bootstrap_addresses must contain only IP addresses")
 		}
 	}
+	for _, address := range c.DNS.DirectBootstrapAddresses {
+		if net.ParseIP(address) == nil {
+			return fmt.Errorf("dns.direct_bootstrap_addresses must contain only IP addresses")
+		}
+	}
 	if c.Routing.RefreshHours < 0 {
 		return fmt.Errorf("routing.refresh_hours must be positive when set")
 	}
@@ -77,6 +86,45 @@ func (c *Config) Validate() error {
 		ruleListURL, err := url.Parse(rawRuleListURL)
 		if err != nil || (ruleListURL.Scheme != "https" && ruleListURL.Scheme != "http") || ruleListURL.Host == "" {
 			return fmt.Errorf("routing.rule_list_url must be a valid HTTP(S) URL in rule mode")
+		}
+	}
+	for rawName, rawURL := range c.Origin.Lists {
+		name := strings.TrimSpace(rawName)
+		if name == "" {
+			return fmt.Errorf("origin.lists contains an empty list name")
+		}
+		if name != rawName {
+			return fmt.Errorf("origin list name %q must not have surrounding whitespace", rawName)
+		}
+		listURL, err := url.Parse(rawURL)
+		if err != nil || listURL.Scheme != "https" || listURL.Host == "" {
+			return fmt.Errorf("origin list %s must use a valid HTTPS URL", name)
+		}
+	}
+	normalizedOriginDomains := make(map[string]struct{}, len(c.Origin.Domains))
+	for rawPattern, source := range c.Origin.Domains {
+		pattern, err := normalizeOriginDomainPattern(rawPattern)
+		if err != nil {
+			return fmt.Errorf("origin domain %q: %w", rawPattern, err)
+		}
+		if _, exists := normalizedOriginDomains[pattern]; exists {
+			return fmt.Errorf("duplicate origin domain pattern: %s", pattern)
+		}
+		normalizedOriginDomains[pattern] = struct{}{}
+		listName := strings.TrimSpace(source.List)
+		if listName != "" {
+			if _, exists := c.Origin.Lists[listName]; !exists {
+				return fmt.Errorf("origin domain %s references unknown list %q", pattern, listName)
+			}
+			continue
+		}
+		if len(source.Addresses) == 0 {
+			return fmt.Errorf("origin domain %s must reference a named list or contain IP addresses", pattern)
+		}
+		for _, rawAddress := range source.Addresses {
+			if net.ParseIP(strings.TrimSpace(rawAddress)) == nil {
+				return fmt.Errorf("origin domain %s contains invalid IP address %q", pattern, rawAddress)
+			}
 		}
 	}
 	if c.SpeedTest.DownloadBytes < 0 {
@@ -128,6 +176,44 @@ func (c *Config) Validate() error {
 		}
 		if route.Upstream.Port < 0 || route.Upstream.Port > 65535 {
 			return fmt.Errorf("route %s: upstream.port must be between 1 and 65535 when set", host)
+		}
+	}
+	return nil
+}
+
+func normalizeOriginDomainPattern(pattern string) (string, error) {
+	pattern = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(pattern), "."))
+	if strings.HasPrefix(pattern, "*.") {
+		pattern = strings.TrimPrefix(pattern, "*.")
+		if strings.Contains(pattern, "*") {
+			return "", fmt.Errorf("wildcard is only allowed as the leftmost label")
+		}
+		if err := validateDomainName(pattern); err != nil {
+			return "", err
+		}
+		return "*." + pattern, nil
+	}
+	if strings.Contains(pattern, "*") {
+		return "", fmt.Errorf("wildcard must use the *.example.com form")
+	}
+	if err := validateDomainName(pattern); err != nil {
+		return "", err
+	}
+	return pattern, nil
+}
+
+func validateDomainName(host string) error {
+	if host == "" || len(host) > 253 || !strings.Contains(host, ".") || net.ParseIP(host) != nil {
+		return fmt.Errorf("must be a full domain name")
+	}
+	for _, label := range strings.Split(host, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return fmt.Errorf("contains an invalid DNS label")
+		}
+		for _, character := range label {
+			if (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '-' {
+				return fmt.Errorf("contains an invalid DNS label")
+			}
 		}
 	}
 	return nil

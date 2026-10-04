@@ -19,6 +19,7 @@ import (
 )
 
 const minimumUsefulDownload = 64 * 1024
+const maxConcurrentTests = 8
 
 var defaultProfiles = []configuration.SpeedTestProfile{
 	{
@@ -73,6 +74,55 @@ type measurement struct {
 	duration time.Duration
 	index    int
 	ok       bool
+}
+
+// Result is one on-demand speed-test measurement.
+type Result struct {
+	Address  string
+	Provider string
+	Bytes    int64
+	Duration time.Duration
+	OK       bool
+}
+
+func (r Result) Mbps() float64 {
+	if !r.OK || r.Duration <= 0 {
+		return 0
+	}
+	return float64(r.Bytes*8) / r.Duration.Seconds() / 1_000_000
+}
+
+// Test measures explicit addresses. It does not participate in connection routing.
+func (s *Selector) Test(ctx context.Context, network string, addresses []string) []Result {
+	results := make([]Result, len(addresses))
+	if s == nil || s.disabled {
+		return results
+	}
+	var wg sync.WaitGroup
+	limit := make(chan struct{}, maxConcurrentTests)
+	for index, address := range addresses {
+		wg.Add(1)
+		go func(index int, address string) {
+			defer wg.Done()
+			results[index].Address = address
+			select {
+			case limit <- struct{}{}:
+				defer func() { <-limit }()
+			case <-ctx.Done():
+				return
+			}
+			m := s.measureAddress(ctx, network, address)
+			results[index] = Result{Address: address, Provider: m.provider, Bytes: m.bytes, Duration: m.duration, OK: m.ok}
+		}(index, address)
+	}
+	wg.Wait()
+	sort.SliceStable(results, func(i, j int) bool {
+		if results[i].OK != results[j].OK {
+			return results[i].OK
+		}
+		return results[i].Mbps() > results[j].Mbps()
+	})
+	return results
 }
 
 func NewSelector(cfg configuration.SpeedTestConfig) *Selector {
