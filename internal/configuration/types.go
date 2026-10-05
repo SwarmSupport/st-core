@@ -67,7 +67,7 @@ func (s *OriginSource) UnmarshalYAML(node *yaml.Node) error {
 	case yaml.SequenceNode:
 		return node.Decode(&s.Addresses)
 	default:
-		return fmt.Errorf("must be a named origin list or an array of IP addresses")
+		return fmt.Errorf("must be a named origin list, domain name, or an array of IP addresses or domain names")
 	}
 }
 
@@ -81,9 +81,17 @@ func (c RoutingConfig) RefreshInterval() time.Duration {
 type SpeedTestConfig struct {
 	Disabled        bool               `yaml:"disabled"`
 	DownloadBytes   int64              `yaml:"download_bytes"`
+	MinMbps         float64            `yaml:"min_mbps"`
 	TimeoutSeconds  int                `yaml:"timeout_seconds"`
 	CacheTTLSeconds int                `yaml:"cache_ttl_seconds"`
 	Profiles        []SpeedTestProfile `yaml:"profiles"`
+}
+
+func (c SpeedTestConfig) MinimumMbps() float64 {
+	if c.MinMbps <= 0 {
+		return 1
+	}
+	return c.MinMbps
 }
 
 type SpeedTestProfile struct {

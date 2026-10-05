@@ -91,7 +91,8 @@ Commands:
   start dns                     Start the policy DNS server
   start https                   Start the HTTPS gateway
   start http                    Start the HTTP gateway
-  speedtest <IP:port|CIDR> [...] Measure addresses on demand (CIDR uses port 443)
+  speedtest                     Resolve provider URLs and test their IPs
+  speedtest <IP:port|CIDR> [...] Test specified IPs (CIDR uses port 443)
   help                          Show this help
 
 "serve" is an alias for "start".`)
@@ -179,6 +180,7 @@ func serve(cfg *configuration.Config, target string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+	go speedtest.SelectAtStartup(ctx, cfg.SpeedTest, resolver, "iplist")
 	select {
 	case err := <-serverErrors:
 		return err
@@ -217,32 +219,72 @@ func runCA(cfg *configuration.Config, args []string) error {
 }
 
 func runSpeedtest(cfg *configuration.Config, args []string) error {
-	if len(args) == 0 {
-		return errors.New("usage: st-core [-config path] speedtest <IP:port|IPv4-CIDR> [...]")
-	}
-	addresses, err := expandSpeedtestTargets(args)
-	if err != nil {
-		return err
+	var addresses []string
+	if len(args) > 0 {
+		var err error
+		addresses, err = expandSpeedtestTargets(args)
+		if err != nil {
+			return err
+		}
 	}
 	options := cfg.SpeedTest
 	options.Disabled = false // An explicit CLI request always runs the test.
 	selector := speedtest.NewSelector(options)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	results := selector.Test(ctx, "tcp", addresses)
+	resolved, resolveErr := selector.ResolveTargets(ctx, systemResolver{})
+	if resolveErr != nil {
+		log.Printf("provider DNS warning: %v", resolveErr)
+	}
+	var results []speedtest.Result
+	if len(args) == 0 {
+		if len(resolved) == 0 {
+			return errors.New("no provider download URLs resolved to test IPs")
+		}
+		results = selector.TestTargets(ctx, "tcp", resolved)
+	} else {
+		matched := make(map[string][]speedtest.Target)
+		for _, target := range resolved {
+			matched[target.Address] = append(matched[target.Address], target)
+		}
+		var providerTargets []speedtest.Target
+		var unknownAddresses []string
+		for _, address := range addresses {
+			if targets := matched[address]; len(targets) > 0 {
+				providerTargets = append(providerTargets, targets...)
+			} else {
+				unknownAddresses = append(unknownAddresses, address)
+			}
+		}
+		results = selector.TestTargets(ctx, "tcp", providerTargets)
+		results = append(results, selector.Test(ctx, "tcp", unknownAddresses)...)
+	}
 	successes := 0
 	for _, result := range results {
 		if !result.OK {
-			fmt.Printf("%s unavailable\n", result.Address)
+			fmt.Printf("%s provider=%s unavailable\n", result.Address, providerLabel(result.Provider))
 			continue
 		}
 		successes++
-		fmt.Printf("%s %.2f Mbps (%s, %d bytes in %s)\n", result.Address, result.Mbps(), result.Provider, result.Bytes, result.Duration.Round(time.Millisecond))
+		fmt.Printf("%s provider=%s %.2f Mbps (%d bytes in %s)\n", result.Address, result.Provider, result.Mbps(), result.Bytes, result.Duration.Round(time.Millisecond))
 	}
 	if successes == 0 {
 		return errors.New("no speed-test endpoint accepted the specified addresses")
 	}
 	return nil
+}
+
+type systemResolver struct{}
+
+func (systemResolver) Resolve(ctx context.Context, host string) ([]net.IP, error) {
+	return net.DefaultResolver.LookupIP(ctx, "ip", host)
+}
+
+func providerLabel(name string) string {
+	if name == "" {
+		return "unknown"
+	}
+	return name
 }
 
 func expandSpeedtestTargets(inputs []string) ([]string, error) {

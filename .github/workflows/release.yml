@@ -137,6 +137,7 @@ jobs:
               ./cmd/st-core
 
             cp config.yaml LICENSE "$package_dir/"
+            cp -R iplist "$package_dir/"
 
             if [[ "$target_os" == "windows" ]]; then
               (cd "$package_dir" && zip -q "${GITHUB_WORKSPACE}/dist/${asset_name}.zip" ./*)

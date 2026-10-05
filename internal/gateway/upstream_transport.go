@@ -50,8 +50,11 @@ func BuildTransport(route configuration.Route, resolver DomainResolver, origins 
 }
 
 func (d *originDialer) dialTCP(ctx context.Context, network, _ string) (net.Conn, error) {
-	source, configured := d.configuredCandidates()
+	source, configured, configuredErr := d.configuredCandidates(ctx)
 	var dialErrors []error
+	if configuredErr != nil {
+		dialErrors = append(dialErrors, configuredErr)
+	}
 	for _, address := range configured {
 		connection, err := d.dialer.DialContext(ctx, network, address)
 		if err == nil {
@@ -76,8 +79,11 @@ func (d *originDialer) dialTCP(ctx context.Context, network, _ string) (net.Conn
 }
 
 func (d *originDialer) dialTLS(ctx context.Context, network, _ string) (net.Conn, error) {
-	source, configured := d.configuredCandidates()
+	source, configured, configuredErr := d.configuredCandidates(ctx)
 	dialErrors := make([]error, 0, len(configured))
+	if configuredErr != nil {
+		dialErrors = append(dialErrors, configuredErr)
+	}
 	for _, address := range configured {
 		conn, err := d.handshake(ctx, network, address)
 		if err == nil {
@@ -115,9 +121,8 @@ func (d *originDialer) dialTLS(ctx context.Context, network, _ string) (net.Conn
 	return nil, fmt.Errorf("connect to origin %s: %w", d.route.Upstream.Host, errors.Join(dialErrors...))
 }
 
-func (d *originDialer) configuredCandidates() (string, []string) {
-	source, addresses := d.origins.Endpoints(d.route.Upstream.Host, d.route.Upstream.OriginPort())
-	return source, addresses
+func (d *originDialer) configuredCandidates(ctx context.Context) (string, []string, error) {
+	return d.origins.Endpoints(ctx, d.route.Upstream.Host, d.route.Upstream.OriginPort())
 }
 
 func (d *originDialer) handshake(ctx context.Context, network, address string) (net.Conn, error) {

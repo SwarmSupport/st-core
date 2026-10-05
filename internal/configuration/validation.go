@@ -113,22 +113,31 @@ func (c *Config) Validate() error {
 		normalizedOriginDomains[pattern] = struct{}{}
 		listName := strings.TrimSpace(source.List)
 		if listName != "" {
-			if _, exists := c.Origin.Lists[listName]; !exists {
-				return fmt.Errorf("origin domain %s references unknown list %q", pattern, listName)
+			if _, exists := c.Origin.Lists[listName]; exists {
+				continue
+			}
+			if err := validateDomainName(strings.ToLower(strings.TrimSuffix(listName, "."))); err != nil {
+				return fmt.Errorf("origin domain %s references unknown list or invalid target %q: %w", pattern, listName, err)
 			}
 			continue
 		}
 		if len(source.Addresses) == 0 {
-			return fmt.Errorf("origin domain %s must reference a named list or contain IP addresses", pattern)
+			return fmt.Errorf("origin domain %s must reference a named list or contain IP addresses or domain names", pattern)
 		}
 		for _, rawAddress := range source.Addresses {
-			if net.ParseIP(strings.TrimSpace(rawAddress)) == nil {
-				return fmt.Errorf("origin domain %s contains invalid IP address %q", pattern, rawAddress)
+			target := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(rawAddress), "."))
+			if net.ParseIP(target) == nil {
+				if err := validateDomainName(target); err != nil {
+					return fmt.Errorf("origin domain %s contains invalid target %q: %w", pattern, rawAddress, err)
+				}
 			}
 		}
 	}
 	if c.SpeedTest.DownloadBytes < 0 {
 		return fmt.Errorf("speedtest.download_bytes must be positive when set")
+	}
+	if c.SpeedTest.MinMbps < 0 {
+		return fmt.Errorf("speedtest.min_mbps must be positive when set")
 	}
 	if c.SpeedTest.TimeoutSeconds < 0 {
 		return fmt.Errorf("speedtest.timeout_seconds must be positive when set")

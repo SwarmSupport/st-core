@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"sort"
 	"strings"
@@ -19,8 +20,8 @@ import (
 const maxOriginListSize = 256 << 10
 
 type originRule struct {
-	listName  string
-	addresses []net.IP
+	listName string
+	targets  []string
 }
 
 type wildcardOrigin struct {
@@ -29,33 +30,44 @@ type wildcardOrigin struct {
 }
 
 type OriginPool struct {
-	lists              map[string][]net.IP
+	lists              map[string]originList
 	exact              map[string]originRule
 	wildcards          []wildcardOrigin
+	resolver           DomainResolver
 	insecureSkipVerify bool
 }
 
 type originListResult struct {
-	name      string
-	url       string
+	name string
+	url  string
+	list originList
+	err  error
+}
+
+type originList struct {
 	addresses []net.IP
-	err       error
+	prefixes  []netip.Prefix
 }
 
 func LoadOriginPool(ctx context.Context, resolver DomainResolver, cfg configuration.OriginConfig) (*OriginPool, error) {
 	pool := &OriginPool{
-		lists:              make(map[string][]net.IP),
+		lists:              make(map[string]originList),
 		exact:              make(map[string]originRule),
+		resolver:           resolver,
 		insecureSkipVerify: cfg.InsecureSkipVerify,
 	}
 	referencedLists := make(map[string]struct{})
 	for rawPattern, source := range cfg.Domains {
 		pattern := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(rawPattern), "."))
-		rule := originRule{listName: strings.TrimSpace(source.List)}
-		if rule.listName != "" {
-			referencedLists[rule.listName] = struct{}{}
+		scalar := strings.TrimSpace(source.List)
+		rule := originRule{}
+		if _, exists := cfg.Lists[scalar]; scalar != "" && exists {
+			rule.listName = scalar
+			referencedLists[scalar] = struct{}{}
+		} else if scalar != "" {
+			rule.targets = []string{scalar}
 		} else {
-			rule.addresses = parseOriginAddresses(source.Addresses)
+			rule.targets = append([]string(nil), source.Addresses...)
 		}
 		if strings.HasPrefix(pattern, "*.") {
 			pool.wildcards = append(pool.wildcards, wildcardOrigin{
@@ -78,11 +90,11 @@ func LoadOriginPool(ctx context.Context, resolver DomainResolver, cfg configurat
 		rawURL := cfg.Lists[name]
 		go func(name, rawURL string) {
 			data, err := downloadOriginList(ctx, rawURL, resolver)
-			addresses := parseIPList(data)
-			if err == nil && len(addresses) == 0 {
-				err = errors.New("list contained no IP addresses")
+			list := parseIPList(data)
+			if err == nil && len(list.addresses) == 0 && len(list.prefixes) == 0 {
+				err = errors.New("list contained no IP addresses or CIDRs")
 			}
-			results <- originListResult{name: name, url: rawURL, addresses: addresses, err: err}
+			results <- originListResult{name: name, url: rawURL, list: list, err: err}
 		}(name, rawURL)
 	}
 
@@ -93,15 +105,15 @@ func LoadOriginPool(ctx context.Context, resolver DomainResolver, cfg configurat
 			loadErrors = append(loadErrors, fmt.Errorf("%s: %w", result.name, result.err))
 			continue
 		}
-		pool.lists[result.name] = result.addresses
-		log.Printf("origin list=%s addresses=%d source=%s", result.name, len(result.addresses), result.url)
+		pool.lists[result.name] = result.list
+		log.Printf("origin list=%s addresses=%d prefixes=%d source=%s", result.name, len(result.list.addresses), len(result.list.prefixes), result.url)
 	}
 	return pool, errors.Join(loadErrors...)
 }
 
-func (p *OriginPool) Endpoints(host, port string) (string, []string) {
+func (p *OriginPool) Endpoints(ctx context.Context, host, port string) (string, []string, error) {
 	if p == nil {
-		return "", nil
+		return "", nil, nil
 	}
 	host = normalizeRequestHost(host)
 	rule, matched := p.exact[host]
@@ -115,44 +127,86 @@ func (p *OriginPool) Endpoints(host, port string) (string, []string) {
 		}
 	}
 	if !matched {
-		return "", nil
+		return "", nil, nil
 	}
-	addresses := rule.addresses
 	source := "custom"
+	var addresses []net.IP
+	var resolveErrors []error
 	if rule.listName != "" {
-		addresses = p.lists[rule.listName]
+		list := p.lists[rule.listName]
+		addresses = append(addresses, list.addresses...)
 		source = rule.listName
+		if len(list.prefixes) > 0 {
+			if p.resolver == nil {
+				resolveErrors = append(resolveErrors, fmt.Errorf("resolve origin %s: resolver is nil", host))
+			} else {
+				resolved, err := p.resolver.Resolve(ctx, host)
+				if err != nil {
+					resolveErrors = append(resolveErrors, fmt.Errorf("resolve origin %s: %w", host, err))
+				} else {
+					for _, address := range resolved {
+						parsed, ok := netip.AddrFromSlice(address)
+						if !ok {
+							continue
+						}
+						parsed = parsed.Unmap()
+						for _, prefix := range list.prefixes {
+							if prefix.Contains(parsed) {
+								addresses = append(addresses, address)
+								break
+							}
+						}
+					}
+				}
+			}
+		}
+	} else {
+		for _, rawTarget := range rule.targets {
+			target := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(rawTarget), "."))
+			if address := net.ParseIP(target); address != nil {
+				addresses = append(addresses, address)
+				continue
+			}
+			if p.resolver == nil {
+				resolveErrors = append(resolveErrors, fmt.Errorf("resolve custom origin %s: resolver is nil", target))
+				continue
+			}
+			resolved, err := p.resolver.Resolve(ctx, target)
+			if err != nil {
+				resolveErrors = append(resolveErrors, fmt.Errorf("resolve custom origin %s: %w", target, err))
+				continue
+			}
+			if len(resolved) == 0 {
+				resolveErrors = append(resolveErrors, fmt.Errorf("resolve custom origin %s: no addresses returned", target))
+			}
+			addresses = append(addresses, resolved...)
+		}
 	}
 	endpoints := make([]string, 0, len(addresses))
+	seen := make(map[string]struct{}, len(addresses))
 	for _, address := range addresses {
-		endpoints = append(endpoints, net.JoinHostPort(address.String(), port))
-	}
-	return source, endpoints
-}
-
-func parseOriginAddresses(rawAddresses []string) []net.IP {
-	seen := make(map[string]struct{}, len(rawAddresses))
-	addresses := make([]net.IP, 0, len(rawAddresses))
-	for _, rawAddress := range rawAddresses {
-		address := net.ParseIP(strings.TrimSpace(rawAddress))
 		if address == nil {
 			continue
 		}
-		normalized := address.String()
-		if _, exists := seen[normalized]; exists {
+		endpoint := net.JoinHostPort(address.String(), port)
+		if _, exists := seen[endpoint]; exists {
 			continue
 		}
-		seen[normalized] = struct{}{}
-		addresses = append(addresses, address)
+		seen[endpoint] = struct{}{}
+		endpoints = append(endpoints, endpoint)
 	}
-	return addresses
+	return source, endpoints, errors.Join(resolveErrors...)
 }
 
-func parseIPList(data []byte) []net.IP {
+func parseIPList(data []byte) originList {
 	seen := make(map[string]struct{})
-	var addresses []net.IP
+	var list originList
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(strings.SplitN(line, "#", 2)[0])
+		if prefix, err := netip.ParsePrefix(line); err == nil {
+			list.prefixes = append(list.prefixes, prefix.Masked())
+			continue
+		}
 		address := net.ParseIP(line)
 		if address == nil {
 			continue
@@ -162,9 +216,9 @@ func parseIPList(data []byte) []net.IP {
 			continue
 		}
 		seen[normalized] = struct{}{}
-		addresses = append(addresses, address)
+		list.addresses = append(list.addresses, address)
 	}
-	return addresses
+	return list
 }
 
 func downloadOriginList(ctx context.Context, rawURL string, resolver DomainResolver) ([]byte, error) {

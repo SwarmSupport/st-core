@@ -52,12 +52,15 @@ origin:
     "*.google.com":
       - "142.251.10.94"
       - "172.217.194.94"
-    # A domain can also use literal origin IPs instead of a named list:
+    # A domain can also use origin IPs or domain names instead of a named list.
+    # Domain names are resolved through the configured DoH server when connecting:
+    # example.com: origin.example.net
     # example.com:
     #   - "1.1.1.1"
-    #   - "1.0.0.1"
+    #   - "origin.example.net"
 
 speedtest:
   download_bytes: 1000000
+  min_mbps: 1
   timeout_seconds: 8
   cache_ttl_seconds: 1800

@@ -1,0 +1,13 @@
+# Source: https://techdocs.akamai.com/origin-ip-acl/docs/update-your-origin-server
+# Akamai documents these as origin-facing ACL prefixes. Client-facing edge
+# prefixes are account-specific; startup probes only current DoH answers in
+# this overlap and does not assume every address in a prefix serves a site.
+2.16.0.0/13
+23.0.0.0/12
+23.32.0.0/11
+23.192.0.0/11
+95.100.0.0/15
+184.24.0.0/13
+2405:9600::/32
+2600:1400::/24
+2a02:26f0::/32

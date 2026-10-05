@@ -20,6 +20,7 @@ import (
 
 const minimumUsefulDownload = 64 * 1024
 const maxConcurrentTests = 8
+const maxResolvedTargets = 1024
 
 var defaultProfiles = []configuration.SpeedTestProfile{
 	{
@@ -85,11 +86,92 @@ type Result struct {
 	OK       bool
 }
 
+// Target ties a resolved address to the provider URL used to test it.
+type Target struct {
+	Address  string
+	Provider string
+	profile  profile
+}
+
+type Resolver interface {
+	Resolve(context.Context, string) ([]net.IP, error)
+}
+
 func (r Result) Mbps() float64 {
 	if !r.OK || r.Duration <= 0 {
 		return 0
 	}
 	return float64(r.Bytes*8) / r.Duration.Seconds() / 1_000_000
+}
+
+// ResolveTargets resolves each provider's download URL host. A target retains
+// its provider even when multiple providers resolve to the same IP address.
+func (s *Selector) ResolveTargets(ctx context.Context, resolver Resolver) ([]Target, error) {
+	if s == nil || resolver == nil {
+		return nil, errors.New("speedtest selector and DNS resolver are required")
+	}
+	var targets []Target
+	var resolveErrors []error
+	seen := make(map[string]struct{})
+	for _, candidate := range s.profiles {
+		host := candidate.url.Hostname()
+		port := candidate.url.Port()
+		if port == "" {
+			if candidate.url.Scheme == "http" {
+				port = "80"
+			} else {
+				port = "443"
+			}
+		}
+		resolveCtx, cancel := context.WithTimeout(ctx, s.timeout)
+		addresses, err := resolver.Resolve(resolveCtx, host)
+		cancel()
+		if err != nil {
+			resolveErrors = append(resolveErrors, fmt.Errorf("resolve %s (%s): %w", candidate.name, host, err))
+			continue
+		}
+		for _, ip := range addresses {
+			address := net.JoinHostPort(ip.String(), port)
+			key := candidate.name + "\x00" + candidate.url.String() + "\x00" + address
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			if len(targets) >= maxResolvedTargets {
+				return nil, fmt.Errorf("resolved speedtest targets exceed %d", maxResolvedTargets)
+			}
+			seen[key] = struct{}{}
+			targets = append(targets, Target{Address: address, Provider: candidate.name, profile: candidate})
+		}
+	}
+	return targets, errors.Join(resolveErrors...)
+}
+
+// TestTargets measures resolved IPs against their own providers' download URLs.
+func (s *Selector) TestTargets(ctx context.Context, network string, targets []Target) []Result {
+	results := make([]Result, len(targets))
+	if s == nil || s.disabled {
+		return results
+	}
+	var wg sync.WaitGroup
+	limit := make(chan struct{}, maxConcurrentTests)
+	for index, target := range targets {
+		wg.Add(1)
+		go func(index int, target Target) {
+			defer wg.Done()
+			results[index] = Result{Address: target.Address, Provider: target.Provider}
+			select {
+			case limit <- struct{}{}:
+				defer func() { <-limit }()
+			case <-ctx.Done():
+				return
+			}
+			bytesRead, duration, err := s.download(ctx, network, target.Address, target.profile)
+			results[index] = Result{Address: target.Address, Provider: target.Provider, Bytes: bytesRead, Duration: duration, OK: err == nil}
+		}(index, target)
+	}
+	wg.Wait()
+	sortResults(results)
+	return results
 }
 
 // Test measures explicit addresses. It does not participate in connection routing.
@@ -116,13 +198,17 @@ func (s *Selector) Test(ctx context.Context, network string, addresses []string)
 		}(index, address)
 	}
 	wg.Wait()
+	sortResults(results)
+	return results
+}
+
+func sortResults(results []Result) {
 	sort.SliceStable(results, func(i, j int) bool {
 		if results[i].OK != results[j].OK {
 			return results[i].OK
 		}
 		return results[i].Mbps() > results[j].Mbps()
 	})
-	return results
 }
 
 func NewSelector(cfg configuration.SpeedTestConfig) *Selector {
