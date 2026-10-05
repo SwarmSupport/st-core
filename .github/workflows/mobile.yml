@@ -20,6 +20,8 @@ jobs:
         with:
           go-version-file: go.mod
       - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
       - name: Install Android NDK
         run: |
           sdkmanager 'platforms;android-35' 'ndk;27.2.12479018'
