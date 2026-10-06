@@ -13,7 +13,7 @@ gomobile init
 
 mkdir -p dist
 if [[ "$platform" == android ]]; then
-  gomobile bind -target=android -o dist/st-core.aar ./mobilecore
+  gomobile bind -target=android -androidapi=21 -o dist/st-core.aar ./mobilecore
 else
   bundle_id="${2:-org.swarmtools.stcore}"
   gomobile bind -target=ios -bundleid "$bundle_id" -o dist/STCore.xcframework ./mobilecore
